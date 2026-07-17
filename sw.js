@@ -1,5 +1,5 @@
 /* Livisazón — service worker (offline + instalable) */
-const CACHE = 'livisazon-v4';
+const CACHE = 'livisazon-v5';
 const ASSETS = [
   './',
   './index.html',
@@ -25,6 +25,10 @@ self.addEventListener('activate', (e) => {
 
 self.addEventListener('fetch', (e) => {
   if (e.request.method !== 'GET') return;
+  // Sólo lo propio. La consulta de códigos de barras (Open Food Facts) va directo
+  // a la red: cacheada devolvería nombres viejos y, al fallar, el index.html en
+  // lugar del JSON que espera el escáner.
+  if (new URL(e.request.url).origin !== self.location.origin) return;
   e.respondWith(
     caches.match(e.request).then((cached) => {
       if (cached) return cached;

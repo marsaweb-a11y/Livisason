@@ -164,6 +164,21 @@
   .scan-result{display:flex;align-items:center;gap:12px;padding:12px;background:#fff;border:1px solid var(--line);border-radius:12px;margin-top:12px;}
   .scan-code{font-family:var(--font-mono);font-size:11px;color:var(--stone-soft);}
 
+  /* ===== escáner de códigos de barras ===== */
+  .scan-stage{position:relative;border-radius:14px;overflow:hidden;background:#14110E;aspect-ratio:4/3;display:none;margin-top:12px;}
+  .scan-stage.live{display:block;}
+  .scan-stage video{width:100%;height:100%;object-fit:cover;display:block;}
+  .scan-frame{position:absolute;inset:24% 8%;border:2px solid var(--marigold);border-radius:12px;box-shadow:0 0 0 100vmax rgba(20,17,14,.5);}
+  .scan-frame::after{content:"";position:absolute;left:6px;right:6px;top:50%;height:2px;background:var(--marigold);border-radius:2px;animation:scanline 2s ease-in-out infinite;}
+  @keyframes scanline{0%,100%{transform:translateY(-30px);opacity:.35;}50%{transform:translateY(30px);opacity:1;}}
+  .scan-tip{position:absolute;left:0;right:0;bottom:10px;text-align:center;font-size:12px;color:#fff;text-shadow:0 1px 6px rgba(0,0,0,.95);font-weight:600;padding:0 12px;}
+  .scan-status{font-size:13px;color:var(--stone);line-height:1.5;margin-top:10px;min-height:19px;}
+  .scan-status b{font-family:var(--font-mono);color:var(--ink);}
+  .scan-status.good{color:var(--good);} .scan-status.bad{color:var(--bad);}
+  .manualcode{display:flex;gap:8px;align-items:flex-end;margin-top:14px;padding-top:14px;border-top:1px dashed var(--line);flex-wrap:wrap;}
+  .manualcode .field{flex:1 1 190px;}
+  @media(prefers-reduced-motion:reduce){ .scan-frame::after{animation:none;} }
+
   /* ===== editor de recetas ===== */
   .editor{border:1px solid var(--marigold-soft);background:#FEFBF4;border-radius:16px;padding:16px;margin-top:14px;}
   .ed-head{font-family:var(--font-display);font-size:17px;font-weight:600;color:var(--ink);margin-bottom:12px;}
@@ -361,6 +376,7 @@
   var CATS={guiso:"Guisado principal",sopa:"Sopa",acomp:"Acompañamiento",agua:"Agua"};
   var CATKEYS=["guiso","sopa","acomp","agua"];
   var PRODUCTS=[], RECIPES=[];
+  var BARCODES={}; /* código de barras -> nombre del producto, aprendido al escanear */
   var MENU={guiso:null,sopa:null,acomp:null,agua:null};
   var DAY={comidas:60,precio:65};
   var DIAS=["domingo","lunes","martes","miércoles","jueves","viernes","sábado"];
@@ -746,9 +762,125 @@
     $("rec-reset").addEventListener("click",resetApp);
   }
 
+  /* ================= ESCÁNER DE CÓDIGOS ================= */
+  var scanStream=null,scanTimer=null,scanDet=null,pendingCode=null;
+  var SCAN_FORMATS=["ean_13","ean_8","upc_a","upc_e","code_128","code_39","itf"];
+  function scanStatus(html,cls){
+    var el=$("scan-status"); if(!el)return;
+    el.innerHTML=html; el.className="scan-status"+(cls?" "+cls:"");
+  }
+  function stopScan(){
+    if(scanTimer){clearInterval(scanTimer);scanTimer=null;}
+    if(scanStream){scanStream.getTracks().forEach(function(t){t.stop();});scanStream=null;}
+    scanDet=null;
+    var v=$("scan-video"); if(v)v.srcObject=null;
+    var st=$("scan-stage"); if(st)st.classList.remove("live");
+    var a=$("scan-start"),b=$("scan-stop");
+    if(a)a.style.display=""; if(b)b.style.display="none";
+  }
+  function startScan(){
+    if(!window.isSecureContext){scanStatus("La cámara sólo funciona con candado <b>https</b>. Abre la app con https, o escribe el código a mano.","bad");return;}
+    if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){scanStatus("Este navegador no da acceso a la cámara. Escribe el código a mano.","bad");return;}
+    /* Sólo Chrome de Android, macOS y ChromeOS traen lector de códigos.
+       En iPhone y en casi toda computadora con Windows no existe. */
+    if(typeof window.BarcodeDetector==="undefined"){scanStatus("Este navegador no puede leer códigos con la cámara. Funciona en <b>Android</b>; no en iPhone ni en la mayoría de computadoras. Escribe el número a mano aquí abajo.","bad");return;}
+    scanStatus("Revisando el lector…");
+    window.BarcodeDetector.getSupportedFormats().then(function(fmts){
+      var usar=SCAN_FORMATS.filter(function(f){return fmts.indexOf(f)>-1;});
+      if(!usar.length)throw new Error("sin formatos");
+      return navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:"environment"}}}).then(function(s){
+        scanStream=s;
+        var v=$("scan-video");
+        if(!v){stopScan();return;} /* cambió de pantalla mientras pedía permiso */
+        v.srcObject=s; v.play().catch(function(){});
+        $("scan-stage").classList.add("live");
+        $("scan-start").style.display="none"; $("scan-stop").style.display="";
+        scanDet=new window.BarcodeDetector({formats:usar});
+        scanStatus("Buscando código… acerca el producto.");
+        scanTimer=setInterval(scanTick,350);
+      });
+    }).catch(function(err){
+      stopScan();
+      var n=err&&err.name;
+      var m=n==="NotAllowedError"?"No diste permiso de cámara. Actívalo en el candado de la barra de direcciones, o escribe el código a mano.":
+            n==="NotFoundError"?"No encontré cámara en este aparato. Escribe el código a mano.":
+            n==="NotReadableError"?"Otra app está usando la cámara. Ciérrala e intenta de nuevo.":
+            "No se pudo abrir el lector. Escribe el código a mano.";
+      scanStatus(m,"bad");
+    });
+  }
+  function scanTick(){
+    var v=$("scan-video");
+    if(!v||!scanDet||v.readyState<2)return;
+    scanDet.detect(v).then(function(list){
+      if(list&&list.length&&list[0].rawValue){var c=list[0].rawValue;stopScan();onCode(c);}
+    }).catch(function(){});
+  }
+  function onCode(code){
+    code=String(code||"").trim();
+    if(!code){scanStatus("Escribe un código de barras.","bad");return;}
+    try{if(navigator.vibrate)navigator.vibrate(60);}catch(e){}
+    /* Lo ya conocido no vuelve a la red: así el escáner sirve sin internet. */
+    if(BARCODES[code]){
+      scanStatus('Código <b>'+esc(code)+'</b> → <b>'+esc(BARCODES[code])+'</b>. Ya lo conocías.',"good");
+      usarEscaneado(BARCODES[code],code);
+      return;
+    }
+    scanStatus('Código <b>'+esc(code)+'</b> — buscando el nombre…');
+    lookupOFF(code);
+  }
+  function pegarDato(nombre,extra){
+    extra=String(extra==null?"":extra).trim();
+    if(!extra)return nombre;
+    return norm(nombre).indexOf(norm(extra))>-1?nombre:(nombre+" "+extra);
+  }
+  function lookupOFF(code){
+    var url="https://world.openfoodfacts.org/api/v2/product/"+encodeURIComponent(code)+
+            ".json?fields=product_name,product_name_es,brands,quantity";
+    var listo=false;
+    var reloj=setTimeout(function(){if(!listo){listo=true;codigoSinNombre(code,"la búsqueda tardó demasiado");}},7000);
+    /* Open Food Facts responde 404 con JSON {status:0} para lo que no conoce,
+       así que se lee el cuerpo siempre en vez de confiar en el código HTTP. */
+    fetch(url,{headers:{Accept:"application/json"}}).then(function(r){return r.json();}).then(function(j){
+      if(listo)return; listo=true; clearTimeout(reloj);
+      if(!j||j.status!==1||!j.product){codigoSinNombre(code,"no está en la base pública");return;}
+      var p=j.product,nombre=String(p.product_name_es||p.product_name||"").trim();
+      if(!nombre){codigoSinNombre(code,"viene sin nombre en la base");return;}
+      /* La marca y el tamaño sólo se pegan si el nombre no los trae ya:
+         "Nutella" + marca "Nutella" saldría "Nutella Nutella". */
+      nombre=pegarDato(nombre,p.brands?String(p.brands).split(",")[0]:"");
+      nombre=pegarDato(nombre,p.quantity);
+      scanStatus('Código <b>'+esc(code)+'</b> → <b>'+esc(nombre)+'</b>. Ahora pon cuánto compraste y cuánto pagaste.',"good");
+      usarEscaneado(nombre,code);
+    }).catch(function(){
+      if(listo)return; listo=true; clearTimeout(reloj);
+      codigoSinNombre(code,"no hay internet");
+    });
+  }
+  /* Sin nombre no se abandona la captura: se deja el código pendiente y en cuanto
+     la dueña escriba el nombre, registrarCompra() lo amarra para la próxima. */
+  function codigoSinNombre(code,razon){
+    pendingCode=code;
+    scanStatus('Código <b>'+esc(code)+'</b>: '+razon+'. Escribe tú el nombre aquí abajo y lo dejo amarrado a este código para la próxima.',"bad");
+    irABuscar();
+    var b=$("buscar"); if(b)b.focus();
+  }
+  function usarEscaneado(nombre,code){
+    pendingCode=code;
+    var p=findProd(nombre);
+    pickProduct(nombre,p?p.unidad:normUnit("",nombre,""),!!p);
+    irABuscar();
+    var b=$("buscar"); if(b)b.value=nombre;
+  }
+  function irABuscar(){
+    var t=document.querySelector('.mtab[data-metodo="buscar"]');
+    if(t)t.click();
+  }
+
   /* ================= INVENTARIO ================= */
   var compraSel=null;
   function renderInventario(){
+    stopScan(); /* el re-render destruye el <video>: hay que soltar la cámara antes */
     var el=$("s-inventario");
     var need=needMap();
     var prods=PRODUCTS.slice().sort(function(a,b){return norm(a.nombre)<norm(b.nombre)?-1:1;}).map(function(p){
@@ -775,8 +907,18 @@
           '<div id="compra-form"></div>'+
         '</div>'+
         '<div class="method" id="m-escaneo">'+
-          '<div style="font-size:12.5px;color:var(--stone);line-height:1.5"><b>En la app instalada</b> esto abre la cámara del celular, lee el código de barras y trae el nombre del producto de una base pública (Open Food Facts). El precio lo pones tú. Ejemplo:</div>'+
-          '<div class="scan-result" style="margin-top:12px"><div style="flex:1"><div style="font-weight:600">Frijol Bayo 900 g</div><div class="scan-code">código 7501055 3105 31</div></div><button class="btn sm primary" id="scan-use">Usar este</button></div>'+
+          '<div style="font-size:12.5px;color:var(--stone);line-height:1.5">Apunta la cámara al código de barras. Si el producto está en la base pública <b>Open Food Facts</b>, el nombre llega solo. El precio siempre lo pones tú.</div>'+
+          '<div class="actions" style="margin-top:12px">'+
+            '<button class="btn primary" id="scan-start"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>Encender cámara</button>'+
+            '<button class="btn" id="scan-stop" style="display:none">Detener cámara</button>'+
+          '</div>'+
+          '<div class="scan-stage" id="scan-stage"><video id="scan-video" playsinline autoplay muted></video><div class="scan-frame"></div><div class="scan-tip">Acerca el código de barras al recuadro</div></div>'+
+          '<div class="scan-status" id="scan-status"></div>'+
+          '<div class="manualcode">'+
+            '<div class="field"><label>O escribe el código de barras</label><div class="inp"><input id="scan-manual" type="text" inputmode="numeric" autocomplete="off" placeholder="7501055310531"></div></div>'+
+            '<button class="btn" id="scan-lookup">Buscar código</button>'+
+          '</div>'+
+          '<p style="font-size:11.5px;color:var(--stone-soft);margin-top:10px;line-height:1.5">La cámara lee códigos en <b>Android</b> (con candado https y tu permiso). En iPhone y en computadora el navegador no sabe leerlos: ahí escribe el número a mano — también sirve una pistola lectora USB, que teclea el código sola.</p>'+
         '</div>'+
         '<div class="actions" style="margin-top:16px"><button class="btn" id="btn-import-prod"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>Importar productos (CSV)</button>'+
         '<button class="btn" id="btn-paste-prod"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/></svg>Pegar desde Excel</button>'+
@@ -790,11 +932,20 @@
     el.querySelectorAll(".mtab[data-metodo]").forEach(function(b){b.addEventListener("click",function(){
       el.querySelectorAll(".mtab[data-metodo]").forEach(function(x){x.classList.toggle("is-on",x===b);});
       var m=b.getAttribute("data-metodo");
+      if(m!=="escaneo")stopScan(); /* no dejar la cámara prendida al cambiar de pestaña */
       $("m-buscar").classList.toggle("show",m==="buscar");
       $("m-escaneo").classList.toggle("show",m==="escaneo");
     });});
     $("btn-ticket").addEventListener("click",function(){toast("Próximamente: tomas una foto del ticket del super y la app captura todo. Por ahora usa el buscador.");});
-    $("scan-use").addEventListener("click",function(){pickProduct("Frijol Bayo","kg",false);el.querySelector('.mtab[data-metodo="buscar"]').click();});
+
+    $("scan-start").addEventListener("click",startScan);
+    $("scan-stop").addEventListener("click",function(){stopScan();scanStatus("Cámara apagada.");});
+    $("scan-lookup").addEventListener("click",function(){onCode($("scan-manual").value);});
+    /* Enter también dispara la búsqueda: las pistolas lectoras USB teclean el
+       código y mandan Enter, así funcionan sin tocar nada más. */
+    $("scan-manual").addEventListener("keydown",function(e){
+      if(e.key==="Enter"){e.preventDefault();onCode(this.value);}
+    });
 
     var inp=$("buscar");
     inp.addEventListener("input",function(){renderResults(inp.value);});
@@ -836,15 +987,27 @@
     var host=$("compra-form");if(!host)return;
     if(!compraSel){host.innerHTML="";return;}
     var s=compraSel;
-    host.innerHTML='<div class="compra-form"><div class="cf-top"><span style="width:9px;height:9px;border-radius:50%;background:var(--marigold);display:inline-block;flex:0 0 auto"></span>'+esc(s.nombre)+' <span class="pill unit">'+s.unidad+'</span>'+(s.existing?' <span class="pill ghost">ya lo tienes: '+money(s.precio)+'/'+s.unidad+'</span>':' <span class="pill good">producto nuevo</span>')+'</div>'+
-      '<div class="cf-grid"><div class="field"><label>¿Cuánto compraste? ('+s.unidad+')</label><div class="inp"><input id="cf-qty" type="number" min="0" step="0.1" placeholder="0"></div></div>'+
+    /* En un producto ya conocido la unidad no se toca: cambiarla dejaría el stock
+       viejo en una medida y el nuevo en otra. En uno nuevo sí se elige — lo
+       escaneado es casi siempre empaquetado y la unidad adivinada suele fallar. */
+    var ctlUnidad=s.existing
+      ? '<span class="pill unit">'+s.unidad+'</span>'
+      : '<select id="cf-unit" style="width:auto;padding:5px 28px 5px 10px;font-size:12.5px">'+
+        UNITS.map(function(u){return '<option value="'+u+'"'+(s.unidad===u?" selected":"")+'>'+u+'</option>';}).join("")+'</select>';
+    host.innerHTML='<div class="compra-form"><div class="cf-top"><span style="width:9px;height:9px;border-radius:50%;background:var(--marigold);display:inline-block;flex:0 0 auto"></span>'+esc(s.nombre)+' '+ctlUnidad+(s.existing?' <span class="pill ghost">ya lo tienes: '+money(s.precio)+'/'+s.unidad+'</span>':' <span class="pill good">producto nuevo</span>')+'</div>'+
+      '<div class="cf-grid"><div class="field"><label id="cf-qty-lbl">¿Cuánto compraste? ('+s.unidad+')</label><div class="inp"><input id="cf-qty" type="number" min="0" step="0.1" placeholder="0"></div></div>'+
       '<div class="field"><label>¿Cuánto pagaste en total?</label><div class="inp"><span>$</span><input id="cf-total" type="number" min="0" step="1" placeholder="0"></div></div></div>'+
       '<div class="cf-hint" id="cf-hint">Escribe cuánto compraste y cuánto pagaste.</div>'+
       '<div class="actions" style="margin-top:12px"><button class="btn primary" id="cf-save"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>Registrar compra</button><button class="btn" id="cf-cancel">Cancelar</button></div></div>';
+    if($("cf-unit"))$("cf-unit").addEventListener("change",function(){
+      s.unidad=this.value;
+      $("cf-qty-lbl").textContent="¿Cuánto compraste? ("+s.unidad+")";
+      updateCfHint();
+    });
     $("cf-qty").addEventListener("input",updateCfHint);
     $("cf-total").addEventListener("input",updateCfHint);
     $("cf-save").addEventListener("click",registrarCompra);
-    $("cf-cancel").addEventListener("click",function(){compraSel=null;$("buscar").value="";renderCompraForm();});
+    $("cf-cancel").addEventListener("click",function(){compraSel=null;pendingCode=null;$("buscar").value="";renderCompraForm();});
     $("cf-qty").focus();
   }
   function updateCfHint(){
@@ -863,7 +1026,10 @@
     var p=findProd(s.nombre);
     if(p){p.precio=(p.stock*p.precio+total)/(p.stock+qty);p.stock+=qty;}
     else{PRODUCTS.push({nombre:s.nombre,unidad:s.unidad,precio:qty>0?total/qty:0,stock:qty});p=findProd(s.nombre);}
-    toast("<b>"+esc(s.nombre)+"</b>: +"+q(qty)+" "+s.unidad+" · el "+s.unidad+" quedó a "+money(p.precio)+" (promedio)");
+    var amarrado=false;
+    if(pendingCode){BARCODES[pendingCode]=p.nombre;pendingCode=null;amarrado=true;}
+    toast("<b>"+esc(s.nombre)+"</b>: +"+q(qty)+" "+s.unidad+" · el "+s.unidad+" quedó a "+money(p.precio)+" (promedio)"+
+      (amarrado?" · código guardado, la próxima lo reconoce solo":""));
     compraSel=null;saveState();renderInventario();
   }
 
@@ -895,6 +1061,7 @@
   var TITLES={menu:["Menú del día","Arma el menú: guisado, sopa, acompañamiento y agua."],preparacion:["Preparación","El paso a paso de cada platillo del menú de hoy."],almacen:["Almacén de recetas","Tu base de datos de guisos, sopas, acompañantes y aguas."],inventario:["Inventario","Productos, precios y existencias. El costo de cada producto alimenta tus recetas."],margen:["Margen","Cuánto ganas con el menú de hoy."]};
   var DAY_ONLY={menu:1,preparacion:1,margen:1};
   function show(screen){
+    stopScan(); /* salir de Inventario no debe dejar la cámara encendida */
     document.querySelectorAll(".screen").forEach(function(s){s.classList.toggle("is-active",s.id==="s-"+screen);});
     document.querySelectorAll("[data-screen]").forEach(function(n){n.classList.toggle("is-active",n.getAttribute("data-screen")===screen);});
     $("scr-title").textContent=TITLES[screen][0];$("scr-sub").textContent=TITLES[screen][1];
@@ -1080,15 +1247,15 @@
   var toastT=null;function toast(html){var el=$("toast");el.innerHTML=html;el.classList.add("show");clearTimeout(toastT);toastT=setTimeout(function(){el.classList.remove("show");},3200);}
 
   /* ---------- persistencia (guarda en el dispositivo) ---------- */
-  function saveState(){try{localStorage.setItem("livisazon.v2",JSON.stringify({PRODUCTS:PRODUCTS,RECIPES:RECIPES,MENU:MENU,DAY:DAY,HISTORY:HISTORY.map(function(h){return {fecha:(h.fecha instanceof Date?h.fecha.toISOString():h.fecha),menu:h.menu,comidas:h.comidas,precio:h.precio,margen:h.margen};}),HOY:(HOY instanceof Date?HOY.toISOString():HOY)}));}catch(e){}}
-  function loadState(){try{var s=JSON.parse(localStorage.getItem("livisazon.v2"));if(!s||!s.RECIPES)return false;PRODUCTS=s.PRODUCTS||[];RECIPES=s.RECIPES||[];MENU=s.MENU||{guiso:null,sopa:null,acomp:null,agua:null};DAY=s.DAY||{comidas:60,precio:65};HISTORY=(s.HISTORY||[]).map(function(h){return {fecha:new Date(h.fecha),menu:h.menu,comidas:h.comidas,precio:h.precio,margen:h.margen};});HOY=s.HOY?new Date(s.HOY):new Date();return true;}catch(e){return false;}}
-  function resetApp(){var ok=true;try{ok=window.confirm("¿Borrar TODAS las recetas, productos, inventario e historial y empezar de cero? Esto no se puede deshacer.");}catch(e){}if(!ok)return;try{localStorage.removeItem("livisazon.v2");}catch(e){}try{location.reload();}catch(e){PRODUCTS=[];RECIPES=[];MENU={guiso:null,sopa:null,acomp:null,agua:null};DAY={comidas:60,precio:65};HISTORY=[];HOY=new Date();show("menu");}}
+  function saveState(){try{localStorage.setItem("livisazon.v2",JSON.stringify({PRODUCTS:PRODUCTS,RECIPES:RECIPES,BARCODES:BARCODES,MENU:MENU,DAY:DAY,HISTORY:HISTORY.map(function(h){return {fecha:(h.fecha instanceof Date?h.fecha.toISOString():h.fecha),menu:h.menu,comidas:h.comidas,precio:h.precio,margen:h.margen};}),HOY:(HOY instanceof Date?HOY.toISOString():HOY)}));}catch(e){}}
+  function loadState(){try{var s=JSON.parse(localStorage.getItem("livisazon.v2"));if(!s||!s.RECIPES)return false;PRODUCTS=s.PRODUCTS||[];RECIPES=s.RECIPES||[];BARCODES=s.BARCODES||{};MENU=s.MENU||{guiso:null,sopa:null,acomp:null,agua:null};DAY=s.DAY||{comidas:60,precio:65};HISTORY=(s.HISTORY||[]).map(function(h){return {fecha:new Date(h.fecha),menu:h.menu,comidas:h.comidas,precio:h.precio,margen:h.margen};});HOY=s.HOY?new Date(s.HOY):new Date();return true;}catch(e){return false;}}
+  function resetApp(){var ok=true;try{ok=window.confirm("¿Borrar TODAS las recetas, productos, inventario e historial y empezar de cero? Esto no se puede deshacer.");}catch(e){}if(!ok)return;stopScan();try{localStorage.removeItem("livisazon.v2");}catch(e){}try{location.reload();}catch(e){PRODUCTS=[];RECIPES=[];BARCODES={};MENU={guiso:null,sopa:null,acomp:null,agua:null};DAY={comidas:60,precio:65};HISTORY=[];HOY=new Date();show("menu");}}
 
   /* ---------- init ---------- */
   loadState(); // arranca vacío hasta que la dueña suba sus recetas (CSV/Excel) o toque "Cargar ejemplo"
   show("menu");
   window.addEventListener("beforeunload",saveState);
-  document.addEventListener("visibilitychange",function(){if(document.hidden)saveState();});
+  document.addEventListener("visibilitychange",function(){if(document.hidden){saveState();stopScan();}});
 })();
 </script>
 

@@ -1,0 +1,55 @@
+LIVISAZON - App instalable (PWA)
+=================================
+
+Esta carpeta es la app completa, lista para subir a tu hosting.
+
+ARCHIVOS (subir TODOS, juntos, sin cambiar los nombres):
+  - index.html            (la app)
+  - manifest.webmanifest  (datos de la app para instalarla)
+  - sw.js                 (permite que funcione sin internet)
+  - icon-192.png
+  - icon-512.png
+  - apple-touch-icon.png
+  - favicon-32.png
+
+--------------------------------------------------------
+COMO SUBIRLA A HOSTINGER
+--------------------------------------------------------
+1. Entra a hPanel de Hostinger.
+2. Abre el "Administrador de archivos".
+3. Entra a la carpeta public_html.
+   - Si quieres que la app viva en tudominio.com/livi:
+       crea una carpeta llamada "livi" dentro de public_html
+       y sube ahi TODOS los archivos.
+   - Si quieres que sea la pagina principal (tudominio.com):
+       sube los archivos directo en public_html.
+4. Asegurate de que el dominio tenga SSL activo (candado https).
+   Hostinger lo da gratis: SSL -> instalar/activar.
+   (La app SOLO se puede instalar si abre con https://)
+
+--------------------------------------------------------
+COMO LA INSTALA LIVI
+--------------------------------------------------------
+EN CELULAR (Android / Chrome):
+  1. Abre tudominio.com/livi
+  2. Menu (...) -> "Instalar aplicacion" / "Agregar a pantalla de inicio"
+  3. Aparece el icono de la ollita como una app mas.
+
+EN iPHONE (Safari):
+  1. Abre la pagina en Safari.
+  2. Boton compartir -> "Agregar a inicio".
+
+EN COMPUTADORA (Chrome / Edge):
+  1. Abre la pagina.
+  2. En la barra de direcciones aparece un icono de instalar.
+  3. Click -> Instalar. Queda como programa de escritorio.
+
+--------------------------------------------------------
+NOTAS
+--------------------------------------------------------
+- Los datos (recetas, inventario, historial) se guardan en el
+  mismo dispositivo. Si Livi usa celular y compu, cada uno guarda
+  lo suyo. Para que se sincronicen entre dispositivos hace falta
+  una base de datos en la nube (Supabase) - ese es el siguiente paso.
+- Para actualizar la app: reemplaza los archivos y cambia el numero
+  de version en sw.js (CACHE = 'livisazon-v2', etc.).
